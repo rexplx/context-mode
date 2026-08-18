@@ -391,6 +391,122 @@ describe("buildSessionDirective — task completion filtering", () => {
   });
 });
 
+describe("buildSessionDirective — aggregate size cap", () => {
+  it("caps oversized compact directives while preserving continuation and search recovery", () => {
+    const grouped = {
+      role: [makeEvent("role", "R".repeat(700_000))],
+    };
+    const result = buildSessionDirective(
+      "compact",
+      {
+        grouped,
+        lastPrompt: "Continue the active remediation",
+        fileNames: new Set(["hooks/session-directive.mjs"]),
+      },
+      (name: string) => `mcp__context_mode__${name}`,
+    );
+
+    expect(result.length).toBeLessThanOrEqual(8 * 1024);
+    expect(result).toContain("## Last Request\nContinue the active remediation");
+    expect(result).toContain("\n<session_truncated>\n");
+    expect(result).not.toContain("\\n<session_truncated>");
+    expect(result).toContain("<session_truncated>");
+    expect(result).toContain("mcp__context_mode__ctx_search");
+    expect(result).toContain("<continue_from>");
+    expect(result.match(/<\/session_guide>/g)).toHaveLength(1);
+    expect(result.match(/<\/session_search>/g)).toHaveLength(1);
+    expect(result.match(/<\/session_knowledge>/g)).toHaveLength(1);
+  });
+
+  it("caps oversized resume directives without adding compact continuation guidance", () => {
+    const result = buildSessionDirective("resume", {
+      grouped: { role: [makeEvent("role", "R".repeat(700_000))] },
+      lastPrompt: "Resume the active remediation",
+      fileNames: new Set(),
+    });
+
+    expect(result.length).toBeLessThanOrEqual(8 * 1024);
+    expect(result).toContain('source="continue"');
+    expect(result).toContain("## Last Request\nResume the active remediation");
+    expect(result).toContain("<session_truncated>");
+    expect(result).toContain("ctx_search");
+    expect(result).not.toContain("<continue_from>");
+    expect(result.match(/<\/session_guide>/g)).toHaveLength(1);
+    expect(result.match(/<\/session_search>/g)).toHaveLength(1);
+    expect(result.match(/<\/session_knowledge>/g)).toHaveLength(1);
+  });
+
+  it("caps oversized compact directives without inventing continuation guidance", () => {
+    const result = buildSessionDirective("compact", {
+      grouped: { role: [makeEvent("role", "R".repeat(700_000))] },
+      lastPrompt: undefined,
+      fileNames: new Set(),
+    });
+
+    expect(result.length).toBeLessThanOrEqual(8 * 1024);
+    expect(result).toContain('source="compact"');
+    expect(result).toContain("<session_truncated>");
+    expect(result).toContain("ctx_search");
+    expect(result).not.toContain("<continue_from>");
+  });
+
+  it("keeps recovery guidance outside an incomplete Markdown fence", () => {
+    const result = buildSessionDirective("compact", {
+      grouped: {
+        role: [makeEvent("role", `before fence\n\`\`\`text\n${"R".repeat(700_000)}`)],
+      },
+      lastPrompt: "Continue safely",
+      fileNames: new Set(),
+    });
+
+    expect(result.length).toBeLessThanOrEqual(8 * 1024);
+    expect(result).not.toContain("```text");
+    expect(result).toContain("\n<session_truncated>\n");
+    expect(result).toContain("<continue_from>");
+  });
+
+  it("does not mistake a fenced-code info string for a closing fence", () => {
+    const result = buildSessionDirective("compact", {
+      grouped: {
+        role: [
+          makeEvent(
+            "role",
+            `before fence\n\`\`\`text\ninside\n\`\`\`javascript\n${"R".repeat(700_000)}`,
+          ),
+        ],
+      },
+      lastPrompt: "Continue safely",
+      fileNames: new Set(),
+    });
+
+    expect(result.length).toBeLessThanOrEqual(8 * 1024);
+    expect(result).not.toContain("```text");
+    expect(result).not.toContain("```javascript");
+    expect(result).toContain("\n<session_truncated>\n");
+    expect(result).toContain("<continue_from>");
+  });
+
+  it("leaves directives below the cap unchanged", () => {
+    const result = buildSessionDirective("resume", {
+      grouped: {},
+      lastPrompt: undefined,
+      fileNames: new Set(),
+    });
+
+    expect(result).toBe(
+      '\n<session_knowledge source="continue">' +
+        "\n<session_guide>" +
+        "\n</session_guide>" +
+        "\n<session_search>" +
+        '\nDetailed session data is indexed in context-mode FTS5 (source: "session-events").' +
+        '\nUse ctx_search(queries: [...], source: "session-events") when you need specifics.' +
+        "\nDo NOT call ctx_index() — data is already indexed." +
+        "\n</session_search>" +
+        "\n</session_knowledge>",
+    );
+  });
+});
+
 // ── writeSessionEventsFile — status-aware task sections ──────────────
 
 describe("writeSessionEventsFile — status-aware task sections", () => {

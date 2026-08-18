@@ -34,6 +34,59 @@ function isPriorLeg(ev, boundary) {
 // FTS5 via ctx_search(source: "session-events").
 const DATA_REF_INLINE_MAX = 8; // most-recent captures rendered inline
 const DATA_REF_ENTRY_MAX = 150; // per-entry char cap before it is referenced
+// The session guide is injected directly into the next model context. Every
+// category above has its own guard, but their aggregate previously did not.
+// Keep this aligned with the documented 2K-token resume budget while retaining
+// the first, most-actionable content and a searchable pointer to everything
+// that was omitted.
+const SESSION_DIRECTIVE_MAX_CHARS = 8 * 1024;
+
+function capSessionDirective(block, searchTool, includeContinueFrom) {
+  if (block.length <= SESSION_DIRECTIVE_MAX_CHARS) return block;
+
+  const suffix = [
+    "",
+    "<session_truncated>",
+    `The session guide was capped at ${SESSION_DIRECTIVE_MAX_CHARS} characters.`,
+    `Use ${searchTool}(queries: [...], source: \"session-events\") for indexed details.`,
+    "</session_truncated>",
+    "</session_guide>",
+    "<session_search>",
+    "Detailed session data is indexed in context-mode FTS5 (source: \"session-events\").",
+    `Use ${searchTool}(queries: [...], source: \"session-events\") when you need specifics.`,
+    "Do NOT call ctx_index() — data is already indexed.",
+    "</session_search>",
+    ...(includeContinueFrom
+      ? ["<continue_from>Continue working on the last request. Do NOT ask the user to repeat themselves.</continue_from>"]
+      : []),
+    "</session_knowledge>",
+  ].join("\n");
+
+  const prefixLimit = SESSION_DIRECTIVE_MAX_CHARS - suffix.length;
+  const candidate = block.slice(0, Math.max(0, prefixLimit));
+  const lineBoundary = candidate.lastIndexOf("\n");
+  let prefix = candidate.slice(0, Math.max(0, lineBoundary));
+
+  // If the retained content opened a Markdown fence, drop that incomplete
+  // block so the recovery instructions remain active model guidance.
+  const fences = [...prefix.matchAll(/^ {0,3}(`{3,}|~{3,})([^\n]*)$/gm)];
+  let openFence;
+  for (const fence of fences) {
+    const marker = fence[1];
+    if (!openFence) {
+      openFence = { marker: marker[0], length: marker.length, index: fence.index };
+    } else if (
+      marker[0] === openFence.marker &&
+      marker.length >= openFence.length &&
+      fence[2].trim() === ""
+    ) {
+      openFence = undefined;
+    }
+  }
+  if (openFence) prefix = prefix.slice(0, openFence.index);
+
+  return `${prefix.trimEnd()}${suffix}`;
+}
 
 function renderDataReferences(entries, push, searchHint) {
   const recent = entries.slice(-DATA_REF_INLINE_MAX);
@@ -496,7 +549,7 @@ export function buildSessionDirective(source, eventMeta, toolNamer) {
   }
 
   block += `\n</session_knowledge>`;
-  return block;
+  return capSessionDirective(block, searchTool, Boolean(lastPrompt && isCompact));
 }
 
 // ── Get events for a specific session (used by compact) ──
